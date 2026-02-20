@@ -440,15 +440,62 @@ function calculateETA(done, total) {
     return `${mins}m ${secs}s`;
 }
 
-// ─── Page Capture Logic ───────────────────────────────────────────────────────
+// ─── Page Capture Logic (#23) ────────────────────────────────────────────────
 function capturePageState() {
     return new Promise(resolve => {
         const script = `(function() {
-            const safe = f => { try { return f(); } catch { return null; } };
+            const serializeWithShadowDOM = (root) => {
+                const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+                let html = "";
+                
+                const serializeNode = (node) => {
+                    if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+                    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+                    let str = "<" + node.tagName.toLowerCase();
+                    Array.from(node.attributes).forEach(attr => {
+                        str += " " + attr.name + '="' + attr.value.replace(/"/g, '&quot;') + '"';
+                    });
+                    str += ">";
+
+                    if (node.shadowRoot) {
+                        str += '<template shadowrootmode="' + node.shadowRoot.mode + '">';
+                        str += Array.from(node.shadowRoot.childNodes).map(serializeNode).join("");
+                        str += "</template>";
+                    }
+
+                    if (!["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"].includes(node.tagName.toLowerCase())) {
+                        str += Array.from(node.childNodes).map(serializeNode).join("");
+                        str += "</" + node.tagName.toLowerCase() + ">";
+                    }
+                    return str;
+                };
+
+                // Use a simpler approach for outer serialization to catch everything
+                const getDeepHTML = (el) => {
+                    let clone = el.cloneNode(false);
+                    let openingTag = clone.outerHTML.split("</")[0];
+                    if (!openingTag.endsWith(">")) openingTag += ">";
+
+                    let inner = "";
+                    if (el.shadowRoot) {
+                        inner += '<template shadowrootmode="' + el.shadowRoot.mode + '">';
+                        inner += Array.from(el.shadowRoot.childNodes).map(serializeNode).join("");
+                        inner += "</template>";
+                    }
+                    inner += Array.from(el.childNodes).map(serializeNode).join("");
+
+                    if (openingTag.includes("</")) return openingTag; // self-closing
+                    return openingTag + inner + "</" + el.tagName.toLowerCase() + ">";
+                };
+
+                return getDeepHTML(document.documentElement);
+            };
+
             return {
                 url: window.location.href,
                 title: document.title,
-                html: document.documentElement.outerHTML,
+                html: serializeWithShadowDOM(document.documentElement),
                 inlineStyles: Array.from(document.querySelectorAll('style')).map(s => s.textContent || ''),
                 internalLinks: Array.from(document.querySelectorAll('a[href]'))
                     .map(a => a.href)
@@ -517,46 +564,70 @@ async function injectSSEInterceptor() {
     poll();
 }
 
-// ─── Styles & Save (#1, #16) ──────────────────────────────────────────────────
-function injectInlineStylesLink(html) {
-    const linkTag = '\n  <link rel="stylesheet" href="../assets/css/_inline-styles-combined.css">';
-    // #16: Also clean up script tags for analytics
-    let clean = html.replace(/<script\b[^>]*src="[^"]*(analytics|googletagmanager|hubspot)[^"]*"[^>]*><\/script>/gi, '<!-- removed analytics -->');
-    return clean.replace(/<\/head>/i, `${linkTag}\n</head>`);
-}
-
+// ─── Phase 4 SOTA: ZIP Assembly ──────────────────────────────────────────────
 async function downloadZip() {
     btnDl.disabled = true;
-    setStatus('📦 Assembling ZIP...', 'working');
+    setStatus('📦 Assembling SOTA ZIP...', 'working');
 
     const zip = new JSZip();
     const assetMap = {};
+    const apiMap = {}; // #24: API responses
     const R = captured.requests;
 
-    // Build unique asset map
+    // #25 Structural Refresh: Map assets to new folders
     R.forEach(r => {
         const type = classify(r.mimeType, r.url);
-        const folder = { html: 'dom', css: 'assets/css', js: 'assets/js', img: 'assets/images', font: 'assets/fonts' }[type] || 'assets/misc';
+
+        // If it's JSON/API, save for mocking
+        if (type === 'json' || r.mimeType.includes('application/json')) {
+            const dataPath = `assets/data/${urlToFilename(r.url, 'json')}`;
+            assetMap[r.url] = dataPath;
+            if (r.content) apiMap[r.url] = r.content; // Store for mock-api-data.json
+            return;
+        }
+
+        const folder = {
+            html: 'pages', // Move HTML to pages/
+            css: 'assets/css',
+            js: 'assets/js',
+            img: 'assets/images',
+            font: 'assets/fonts'
+        }[type] || 'assets/misc';
+
         const ext = extFromUrl(r.url) || extFromMime(r.mimeType) || (type === 'js' ? 'js' : type === 'css' ? 'css' : 'bin');
         assetMap[r.url] = `${folder}/${urlToFilename(r.url, ext)}`;
     });
+
+    // Write Mock Handler (#24)
+    zip.file('assets/js/_voxyz_mock_handler.js', generateMockHandlerScript());
+    zip.file('assets/data/mock-api-data.json', JSON.stringify(apiMap, null, 2));
 
     // Write Combined Styles
     const allStyles = new Set();
     Object.values(captured.pages).forEach(p => p.inlineStyles?.forEach(s => allStyles.add(s.trim())));
     zip.file('assets/css/_inline-styles-combined.css', [...allStyles].join('\n\n/* next block */\n\n'));
 
-    // Write Pages
+    // Write Pages (#23, #24, #25)
     for (const [url, state] of Object.entries(captured.pages)) {
         let html = state.html;
+
         // Asset rewriting
         for (const [orig, local] of Object.entries(assetMap)) {
-            html = html.split(orig).join('../' + local);
+            // Calculate relative path from /pages/ to asset
+            const relative = local.startsWith('pages/') ? local.replace('pages/', '') : '../' + local;
+            html = html.split(orig).join(relative);
         }
-        html = injectInlineStylesLink(html);
+
+        // Mock Injection & Styles
+        html = injectSOTAMetadata(html);
+
         const slug = urlToPageSlug(url);
-        zip.file(`dom/${slug}.html`, html);
+        zip.file(`pages/${slug}.html`, html);
     }
+
+    // Root Redirector (#25)
+    const entrySlug = urlToPageSlug(BASE_URL);
+    zip.file('index.html', `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0; url=pages/${entrySlug}.html"></head></html>`);
 
     // Write Assets
     R.forEach(r => {
@@ -566,15 +637,17 @@ async function downloadZip() {
     });
 
     // Write SSE log
-    if (captured.sse.length > 0) {
+    if (captured.sse && captured.sse.length > 0) {
         zip.file('network/sse-messages.json', JSON.stringify(captured.sse, null, 2));
     }
 
     // Final meta
     zip.file('__manifest.json', JSON.stringify({
         date: new Date().toISOString(),
+        voxyz_cloner_version: '2.0-SOTA',
         pages: Object.keys(captured.pages).length,
-        assets: R.length
+        assets: R.length,
+        mock_data_points: Object.keys(apiMap).length
     }, null, 2));
 
     const ts = new Date().getTime();
@@ -582,10 +655,95 @@ async function downloadZip() {
         setStatus(`🗜 Compressing ${metadata.percent.toFixed(0)}%`, 'working');
     }).then(blob => {
         const url = URL.createObjectURL(blob);
-        chrome.downloads.download({ url, filename: `voxyz_clone_${ts}.zip`, saveAs: true });
-        setStatus('✅ Download started', 'done');
+        chrome.downloads.download({ url, filename: `voxyz_sota_clone_${ts}.zip`, saveAs: true });
+        setStatus('✅ SOTA Download started', 'done');
         btnDl.disabled = false;
     });
+}
+
+function injectSOTAMetadata(html) {
+    const stylesLink = '\n  <link rel="stylesheet" href="../assets/css/_inline-styles-combined.css">';
+    const mockScript = '\n  <script src="../assets/js/_voxyz_mock_handler.js"></script>';
+
+    let clean = html.replace(/<script\b[^>]*src="[^"]*(analytics|googletagmanager|hubspot)[^"]*"[^>]*><\/script>/gi, '<!-- removed analytics -->');
+
+    // Inject Mock Script first so it catches early fetches
+    clean = clean.replace(/<head>/i, `<head>${mockScript}`);
+    return clean.replace(/<\/head>/i, `${stylesLink}\n</head>`);
+}
+
+function generateMockHandlerScript() {
+    return `
+/**
+ * VoxYZ Cloner SOTA Mock Handler
+ * Intercepts fetch and XHR to serve local captured data
+ */
+(function() {
+    console.log('[Cloner] API Mock Handler Active');
+    let mockData = null;
+
+    async function loadMockData() {
+        if (mockData) return;
+        try {
+            const resp = await fetch('../assets/data/mock-api-data.json');
+            mockData = await resp.json();
+            console.log('[Cloner] Loaded ' + Object.keys(mockData).length + ' mock endpoints');
+        } catch (e) {
+            console.error('[Cloner] Failed to load mock data:', e);
+            mockData = {};
+        }
+    }
+
+    // Monkey-patch fetch
+    const originalFetch = window.fetch;
+    window.fetch = async function(resource, init) {
+        if (!mockData) await loadMockData();
+        
+        const url = (typeof resource === 'string') ? resource : resource.url;
+        const cleanUrl = url.split('?')[0].split('#')[0];
+
+        // Match exact or contains
+        const match = Object.keys(mockData).find(m => m === url || m === cleanUrl || url.includes(m));
+
+        if (match) {
+            console.log('[Cloner Mock] Intercepted Fetch:', url);
+            return new Response(mockData[match], {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        return originalFetch(resource, init);
+    };
+
+    // Monkey-patch XHR
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        this._url = url;
+        return originalOpen.apply(this, arguments);
+    };
+
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function() {
+        if (!mockData) {
+            loadMockData().then(() => this.send.apply(this, arguments));
+            return;
+        }
+
+        const match = Object.keys(mockData).find(m => m === this._url || this._url.includes(m));
+        if (match) {
+            console.log('[Cloner Mock] Intercepted XHR:', this._url);
+            Object.defineProperty(this, 'status', { value: 200 });
+            Object.defineProperty(this, 'responseText', { value: mockData[match] });
+            Object.defineProperty(this, 'readyState', { value: 4 });
+            this.dispatchEvent(new Event('load'));
+            return;
+        }
+        return originalSend.apply(this, arguments);
+    };
+
+    loadMockData();
+})();
+`;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
