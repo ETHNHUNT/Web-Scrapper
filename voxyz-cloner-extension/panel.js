@@ -10,7 +10,8 @@ let captured = {
     requestUrls: new Set(),
     pages: {},
     cookies: [],
-    sse: [], // #17: Store SSE messages
+    sse: [],   // #17: Store SSE messages
+    storage: {}, // #26: Local/Session storage per URL
 };
 let isCapturing = false;
 let isCrawling = false;
@@ -35,12 +36,14 @@ const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
 const btnCrawl = document.getElementById('btn-crawl');
 const btnCancel = document.getElementById('btn-cancel');
+const btnSnapshot = document.getElementById('btn-snapshot');
 const btnDl = document.getElementById('btn-dl');
 const btnClear = document.getElementById('btn-clear');
 
 const chkFilter = document.getElementById('chk-filter');
 const chkStealth = document.getElementById('chk-stealth');
 const selDepth = document.getElementById('sel-depth');
+const selUA = document.getElementById('sel-ua');
 
 const counterEls = {
     total: document.getElementById('c-total'), html: document.getElementById('c-html'),
@@ -53,6 +56,15 @@ const counts = { total: 0, html: 0, css: 0, js: 0, json: 0, img: 0, font: 0, oth
 // ─── Utils ────────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const tryParseJSON = str => { try { return JSON.parse(str); } catch { return null; } };
+
+async function fetchCookies(url) {
+    return new Promise(resolve => {
+        chrome.runtime.sendMessage({ type: 'GET_COOKIES', url }, response => {
+            if (response && response.cookies) resolve(response.cookies);
+            else resolve([]);
+        });
+    });
+}
 
 function classify(mime = '', url = '') {
     if (mime.includes('html')) return 'html';
@@ -109,8 +121,18 @@ function addPageRow(page) {
         <span class="st st-ok">✓</span>
         <span class="page-url" title="${page.url}">${page.url.replace(BASE_URL, '') || '/'}</span>
         <span class="page-assets">${assetsCount} assets</span>
+        <button class="btn-preview" title="Sandbox Preview">👁</button>
     `;
+    row.querySelector('.btn-preview').addEventListener('click', () => previewPage(page.url));
     pageList.appendChild(row);
+}
+
+function previewPage(url) {
+    const page = captured.pages[url];
+    if (!page) return;
+    const blob = new Blob([page.html], { type: 'text/html' });
+    const blobUrl = URL.createObjectURL(blob);
+    window.open(blobUrl, '_blank');
 }
 
 function formatBytes(b) {
@@ -134,6 +156,8 @@ async function saveToStorage() {
         requests: captured.requests,
         requestUrls: Array.from(captured.requestUrls),
         pages: captured.pages,
+        storage: captured.storage,
+        cookies: captured.cookies,
         counts
     };
     try {
@@ -236,37 +260,78 @@ async function clearAll() {
 
 btnStart.addEventListener('click', startCapture);
 btnStop.addEventListener('click', stopCapture);
-btnClear.addEventListener('click', clearAll);
 btnCrawl.addEventListener('click', autoCrawl);
+btnSnapshot.addEventListener('click', takeManualSnapshot);
+btnDl.addEventListener('click', downloadZip);
 btnCancel.addEventListener('click', () => {
     cancelRequested = true;
     setStatus('🛑 Cancel requested...', 'working');
 });
-btnDl.addEventListener('click', downloadZip);
+btnClear.addEventListener('click', clearAll);
+selUA.addEventListener('change', () => {
+    const ua = selUA.value;
+    console.log('[Cloner] UA set to:', ua);
+});
 
-// ─── Stealth Scripts (#21) ───────────────────────────────────────────────────
+async function takeManualSnapshot() {
+    setStatus('📸 Taking manual snapshot...', 'working');
+    const state = await capturePageState();
+    if (state) {
+        captured.pages[state.url] = state;
+        captured.storage[state.url] = state.storage;
+
+        const cookies = await fetchCookies(state.url);
+        if (cookies && cookies.length > 0) {
+            const existingNames = new Set(captured.cookies.map(c => c.name));
+            cookies.forEach(c => {
+                if (!existingNames.has(c.name)) captured.cookies.push(c);
+            });
+        }
+
+        addPageRow(state);
+        updateStatsUI();
+        saveToStorage();
+        setStatus('✅ Snapshot captured!', 'done');
+    } else {
+        setStatus('❌ Snapshot failed', 'err');
+    }
+}
+
+// ─── Stealth Scripts (#21, #33) ──────────────────────────────────────────────
 function injectStealthScripts() {
     const script = `
         (function() {
             if (window._stealth_active) return;
             window._stealth_active = true;
             
-            // Mouse Jitter
+            // #33: Adaptive Fingerprinting
+            try {
+                // Hide Webdriver
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                
+                // Spoof Hardware
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => Math.floor(Math.random() * 8) + 4 });
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => [4, 8, 16][Math.floor(Math.random() * 3)] });
+                
+                // Spoof Plugins
+                if (!navigator.plugins.length) {
+                    const mockPlugins = [{ name: 'Chrome PDF Viewer' }, { name: 'Native Client' }];
+                    Object.defineProperty(navigator, 'plugins', { get: () => mockPlugins });
+                }
+            } catch(e) {}
+
+            // Mouse Jitter (#21)
             document.addEventListener('mousemove', (e) => {}, {passive: true});
             setInterval(() => {
                 const x = Math.random() * window.innerWidth;
                 const y = Math.random() * window.innerHeight;
                 const event = new MouseEvent('mousemove', {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: x,
-                    clientY: y
+                    view: window, bubbles: true, cancelable: true, clientX: x, clientY: y
                 });
                 document.dispatchEvent(event);
             }, 3000 + Math.random() * 5000);
 
-            console.log('[Cloner] Stealth scripts active');
+            console.log('[Cloner] Stealth & Fingerprinting Active');
         })();
     `;
     chrome.devtools.inspectedWindow.eval(script);
@@ -358,67 +423,72 @@ async function autoCrawl() {
     injectSSEInterceptor();
     if (chkStealth.checked) injectStealthScripts();
 
-    while (queue.length > 0) {
-        if (cancelRequested) break;
+    const maxWorkers = 3;
+    let activeWorkers = 0;
 
-        const { url, depth, retry } = queue.shift();
-        if (crawled.has(url) && retry === 0) continue;
+    const worker = async () => {
+        while (queue.length > 0 && !cancelRequested) {
+            const task = queue.shift();
+            if (crawled.has(task.url) && task.retry === 0) continue;
 
-        const label = url.replace(BASE_URL, '') || '/';
-        const progress = Math.round((crawled.size / (crawled.size + queue.length + 1)) * 100);
+            activeWorkers++;
+            const pageStart = Date.now();
+            const label = task.url.replace(BASE_URL, '') || '/';
 
-        // #9: Progress & ETA
-        const eta = calculateETA(crawled.size, crawled.size + queue.length + 1);
-        progressBar.style.width = `${progress}%`;
-        setStatus(`🕷 [${crawled.size + 1}/${crawled.size + queue.length + 1}] ${progress}% - ETA: ${eta} - ${label}`, 'working');
+            try {
+                setStatus(`🚀 Concurrent [${crawled.size + 1}/${crawled.size + queue.length + activeWorkers}] - ${label}`, 'working');
 
-        const pageStart = Date.now();
-        try {
-            await navigateTo(url);
-            await waitForSettle();
-            await autoScrollPage();
+                const response = await new Promise(resolve => {
+                    chrome.runtime.sendMessage({ type: 'CRAWL_PAGE', url: task.url }, resolve);
+                });
 
-            const state = await capturePageState();
-            if (!state || !state.html) throw new Error('Capture failed');
+                if (response && response.status === 'ok') {
+                    const state = response.data;
+                    captured.pages[task.url] = state;
+                    captured.storage[task.url] = state.storage;
 
-            captured.pages[url] = state;
-            crawled.add(url);
-            counts.pages = Object.keys(captured.pages).length;
-            addPageRow(state);
-            updateStatsUI();
-
-            if (depth < maxDepth) {
-                for (const link of (state.internalLinks || [])) {
-                    const clean = normaliseUrl(link);
-                    if (clean && !known.has(clean)) {
-                        known.add(clean);
-                        queue.push({ url: clean, depth: depth + 1, retry: 0 });
+                    const cookies = await fetchCookies(task.url);
+                    if (cookies) {
+                        const existingNames = new Set(captured.cookies.map(c => c.name));
+                        cookies.forEach(c => { if (!existingNames.has(c.name)) captured.cookies.push(c); });
                     }
-                }
-            }
-            crawlStats.times.push(Date.now() - pageStart);
-        } catch (e) {
-            console.error(`[Cloner] Failed page ${url}:`, e);
-            if (retry < 3) {
-                console.warn(`[Cloner] Retrying ${url} (${retry + 1}/3)`);
-                queue.push({ url, depth, retry: retry + 1 });
-                setStatus(`🔄 Retrying [${retry + 1}/3] ${label}...`, 'working');
-                await sleep(2000);
-            } else {
-                crawled.add(url); // Mark as attempted
-                setStatus(`❌ Failed ${label} after 3 retries`, 'error');
-                await sleep(1000);
-            }
-        }
 
-        // #19: Randomized Delay (Jitter)
-        let delay = CRAWL_DELAY;
-        if (chkStealth.checked) {
-            delay = CRAWL_DELAY * (0.8 + Math.random() * 0.7); // 80% to 150%
-            if (Math.random() > 0.8) delay += 2000; // Occasional long pause
+                    crawled.add(task.url);
+                    addPageRow(state);
+                    updateStatsUI();
+
+                    if (task.depth < maxDepth) {
+                        for (const link of (state.internalLinks || [])) {
+                            const clean = normaliseUrl(link);
+                            if (clean && !known.has(clean)) {
+                                known.add(clean);
+                                queue.push({ url: clean, depth: task.depth + 1, retry: 0 });
+                            }
+                        }
+                    }
+                    crawlStats.times.push(Date.now() - pageStart);
+                } else {
+                    throw new Error(response?.message || 'Worker failure');
+                }
+            } catch (e) {
+                console.error(`[Cloner] worker failed for ${task.url}:`, e);
+                if (task.retry < 2) queue.push({ ...task, retry: task.retry + 1 });
+            } finally {
+                activeWorkers--;
+            }
+
+            // Randomized jitter between tasks
+            await sleep(chkStealth.checked ? 500 + Math.random() * 1000 : 200);
+
+            // Progress UI update
+            const progress = Math.round((crawled.size / (crawled.size + queue.length + activeWorkers)) * 100);
+            progressBar.style.width = `${progress}%`;
         }
-        await sleep(delay);
-    }
+    };
+
+    // Start workers
+    const workers = Array(maxWorkers).fill(null).map(() => worker());
+    await Promise.all(workers);
 
     isCrawling = false;
     btnCrawl.disabled = false;
@@ -440,17 +510,25 @@ function calculateETA(done, total) {
     return `${mins}m ${secs}s`;
 }
 
-// ─── Page Capture Logic (#23) ────────────────────────────────────────────────
+// ─── Page Capture Logic (#23, #26, #28) ──────────────────────────────────────
 function capturePageState() {
     return new Promise(resolve => {
         const script = `(function() {
             const serializeWithShadowDOM = (root) => {
-                const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-                let html = "";
-                
                 const serializeNode = (node) => {
                     if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+                    if (node.nodeType === Node.COMMENT_NODE) return '<!--' + node.textContent + '-->';
                     if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+                    // #28: Canvas to Image serialization
+                    if (node.tagName.toLowerCase() === 'canvas') {
+                        try {
+                            const dataUrl = node.toDataURL('image/png');
+                            return '<img src="' + dataUrl + '" style="' + node.style.cssText + '" class="' + node.className + '" data-voxyz-canvas="true">';
+                        } catch (e) {
+                            return '<!-- canvas capture failed -->';
+                        }
+                    }
 
                     let str = "<" + node.tagName.toLowerCase();
                     Array.from(node.attributes).forEach(attr => {
@@ -471,31 +549,37 @@ function capturePageState() {
                     return str;
                 };
 
-                // Use a simpler approach for outer serialization to catch everything
                 const getDeepHTML = (el) => {
-                    let clone = el.cloneNode(false);
-                    let openingTag = clone.outerHTML.split("</")[0];
-                    if (!openingTag.endsWith(">")) openingTag += ">";
-
-                    let inner = "";
-                    if (el.shadowRoot) {
-                        inner += '<template shadowrootmode="' + el.shadowRoot.mode + '">';
-                        inner += Array.from(el.shadowRoot.childNodes).map(serializeNode).join("");
-                        inner += "</template>";
-                    }
-                    inner += Array.from(el.childNodes).map(serializeNode).join("");
-
-                    if (openingTag.includes("</")) return openingTag; // self-closing
-                    return openingTag + inner + "</" + el.tagName.toLowerCase() + ">";
+                    let opening = "<html";
+                    Array.from(el.attributes).forEach(a => opening += ' ' + a.name + '="' + a.value.replace(/"/g, '&quot;') + '"');
+                    opening += ">";
+                    return opening + Array.from(el.childNodes).map(serializeNode).join("") + "</html>";
                 };
 
                 return getDeepHTML(document.documentElement);
+            };
+
+            // #26: Storage Snapshotting
+            const getStorage = () => {
+                const res = { local: {}, session: {} };
+                try {
+                    for(let i=0; i<localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        res.local[k] = localStorage.getItem(k);
+                    }
+                    for(let i=0; i<sessionStorage.length; i++) {
+                        const k = sessionStorage.key(i);
+                        res.session[k] = sessionStorage.getItem(k);
+                    }
+                } catch(e) {}
+                return res;
             };
 
             return {
                 url: window.location.href,
                 title: document.title,
                 html: serializeWithShadowDOM(document.documentElement),
+                storage: getStorage(),
                 inlineStyles: Array.from(document.querySelectorAll('style')).map(s => s.textContent || ''),
                 internalLinks: Array.from(document.querySelectorAll('a[href]'))
                     .map(a => a.href)
@@ -608,14 +692,24 @@ async function downloadZip() {
     zip.file('assets/css/_inline-styles-combined.css', [...allStyles].join('\n\n/* next block */\n\n'));
 
     // Write Pages (#23, #24, #25)
-    for (const [url, state] of Object.entries(captured.pages)) {
+    const urlsToReplace = Object.keys(assetMap).sort((a, b) => b.length - a.length); // Longest first to avoid partial matches
+    const replacementRegex = urlsToReplace.length > 0
+        ? new RegExp(urlsToReplace.map(u => u.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g')
+        : null;
+
+    const pageEntries = Object.entries(captured.pages);
+    for (let i = 0; i < pageEntries.length; i++) {
+        const [url, state] = pageEntries[i];
         let html = state.html;
 
-        // Asset rewriting
-        for (const [orig, local] of Object.entries(assetMap)) {
-            // Calculate relative path from /pages/ to asset
-            const relative = local.startsWith('pages/') ? local.replace('pages/', '') : '../' + local;
-            html = html.split(orig).join(relative);
+        setStatus(`📝 Processing page ${i + 1}/${pageEntries.length}...`, 'working');
+
+        // Asset rewriting using fast regex
+        if (replacementRegex) {
+            html = html.replace(replacementRegex, (match) => {
+                const local = assetMap[match];
+                return local.startsWith('pages/') ? local.replace('pages/', '') : '../' + local;
+            });
         }
 
         // Mock Injection & Styles
@@ -623,18 +717,54 @@ async function downloadZip() {
 
         const slug = urlToPageSlug(url);
         zip.file(`pages/${slug}.html`, html);
+
+        // UI Break every 2 pages to prevent hang
+        if (i % 2 === 0) await new Promise(r => setTimeout(r, 0));
     }
 
     // Root Redirector (#25)
     const entrySlug = urlToPageSlug(BASE_URL);
     zip.file('index.html', `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0; url=pages/${entrySlug}.html"></head></html>`);
 
-    // Write Assets
-    R.forEach(r => {
-        if (!r.content) return;
-        const options = r.encoding === 'base64' ? { base64: true } : {};
-        zip.file(assetMap[r.url], r.content, options);
-    });
+    // Write Assets & Deep CSS Rewriting (#27)
+    for (let i = 0; i < R.length; i++) {
+        const r = R[i];
+        if (!r.content) continue;
+        const type = classify(r.mimeType, r.url);
+        let content = r.content;
+        let isBase64 = r.encoding === 'base64';
+
+        // #27: Deep CSS Asset Rewriting
+        if (type === 'css' && replacementRegex) {
+            let cssText = isBase64 ? atob(content) : content;
+            cssText = cssText.replace(replacementRegex, (match) => {
+                const local = assetMap[match];
+                return local.replace('assets/', '../');
+            });
+            content = cssText;
+            isBase64 = false;
+        }
+
+        const options = isBase64 ? { base64: true } : {};
+        zip.file(assetMap[r.url], content, options);
+
+        if (i % 20 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+
+    // #26: Write Storage & Cookies
+    zip.file('network/storage_and_state.json', JSON.stringify({
+        storage: captured.storage,
+        cookies: captured.cookies,
+        timestamp: new Date().toISOString()
+    }, null, 2));
+
+    // #30: Sitemaps & Robots
+    const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${Object.keys(captured.pages).map(url => `  <url><loc>${url}</loc></url>`).join('\n')}
+</urlset>`;
+    zip.file('sitemap.xml', sitemap);
+    zip.file('robots.txt', "User-agent: *\nDisallow:\n\nSitemap: sitemap.xml");
 
     // Write SSE log
     if (captured.sse && captured.sse.length > 0) {
@@ -644,10 +774,12 @@ async function downloadZip() {
     // Final meta
     zip.file('__manifest.json', JSON.stringify({
         date: new Date().toISOString(),
-        voxyz_cloner_version: '2.0-SOTA',
+        voxyz_cloner_version: '2.5.0-SOTA',
         pages: Object.keys(captured.pages).length,
         assets: R.length,
-        mock_data_points: Object.keys(apiMap).length
+        api_mocks: Object.keys(apiMap).length,
+        has_shadow_dom: true,
+        has_canvas_captures: true
     }, null, 2));
 
     const ts = new Date().getTime();
@@ -655,8 +787,8 @@ async function downloadZip() {
         setStatus(`🗜 Compressing ${metadata.percent.toFixed(0)}%`, 'working');
     }).then(blob => {
         const url = URL.createObjectURL(blob);
-        chrome.downloads.download({ url, filename: `voxyz_sota_clone_${ts}.zip`, saveAs: true });
-        setStatus('✅ SOTA Download started', 'done');
+        chrome.downloads.download({ url, filename: `voxyz_full_sota_${ts}.zip`, saveAs: true });
+        setStatus('✅ Full SOTA Clone ready!', 'done');
         btnDl.disabled = false;
     });
 }

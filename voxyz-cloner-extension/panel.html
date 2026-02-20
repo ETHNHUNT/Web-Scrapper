@@ -196,20 +196,38 @@
             font-family: 'Consolas', 'Courier New', monospace;
         }
 
-        /* ── Feed Rows ─────────────────────────────── */
         .feed-row,
         .page-row {
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 4px 12px;
+            gap: 12px;
+            padding: 8px 12px;
             border-bottom: 1px solid #252525;
             font-size: 11px;
+            transition: background 0.1s;
         }
 
         .feed-row:hover,
         .page-row:hover {
             background: #2a2d2e;
+        }
+
+        .btn-preview {
+            margin-left: auto;
+            background: #333;
+            border: 1px solid #444;
+            color: #eee;
+            border-radius: 3px;
+            padding: 2px 6px;
+            cursor: pointer;
+            font-size: 10px;
+            transition: 0.2s;
+        }
+
+        .btn-preview:hover {
+            background: #4fc3f7;
+            color: #000;
+            border-color: #4fc3f7;
         }
 
         .badge {
@@ -349,6 +367,15 @@
         <label class="toolbar-opt" title="Randomize behavior to avoid bans">
             <input type="checkbox" id="chk-stealth"> 🛡️ Stealth
         </label>
+        <button class="btn btn-green" id="btn-snapshot" title="Manual DOM Snapshot">📸 Snapshot</button>
+        <div class="toolbar-separator"></div>
+        <select id="sel-ua" class="toolbar-sel" title="User-Agent Spoofing">
+            <option value="default">Default UA</option>
+            <option value="chrome_windows">Chrome (Win)</option>
+            <option value="chrome_mac">Chrome (Mac)</option>
+            <option value="iphone">iPhone (Safari)</option>
+            <option value="android">Android (Chrome)</option>
+        </select>
         <div class="toolbar-separator"></div>
         <button class="btn btn-blue" id="btn-dl" disabled>⬇ Download All</button>
         <button class="btn btn-gray" id="btn-clear">✕ Clear All</button>
