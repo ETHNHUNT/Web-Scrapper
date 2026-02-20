@@ -10,12 +10,17 @@ let captured = {
     requestUrls: new Set(),
     pages: {},
     cookies: [],
+    sse: [], // #17: Store SSE messages
 };
 let isCapturing = false;
 let isCrawling = false;
 let cancelRequested = false;
 let lastReqTime = Date.now();
 let lastSaveTime = Date.now();
+let crawlStats = {
+    startTime: 0,
+    times: [],
+};
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
 const feed = document.getElementById('feed');
@@ -23,6 +28,8 @@ const pageList = document.getElementById('page-list');
 const statusText = document.getElementById('status-text');
 const statusbar = document.getElementById('statusbar');
 const zipEstEl = document.getElementById('zip-est');
+const progressBar = document.getElementById('progress-bar');
+const progressContainer = document.getElementById('progress-container');
 
 const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
@@ -296,29 +303,44 @@ async function autoCrawl() {
     btnCrawl.disabled = true;
     btnCancel.disabled = false;
     btnDl.disabled = true;
+    progressContainer.style.display = 'block';
+    progressBar.style.width = '0%';
+    crawlStats.startTime = Date.now();
+    crawlStats.times = [];
 
-    const queue = [{ url: BASE_URL, depth: 0 }];
+    const queue = [{ url: BASE_URL, depth: 0, retry: 0 }]; // #8: track retry count
     const known = new Set([BASE_URL]);
     const crawled = new Set();
     const maxDepth = parseInt(selDepth.value);
 
+    // #17: Start SSE Interception
+    injectSSEInterceptor();
+
     while (queue.length > 0) {
         if (cancelRequested) break;
 
-        const { url, depth } = queue.shift();
-        if (crawled.has(url)) continue;
-        crawled.add(url);
+        const { url, depth, retry } = queue.shift();
+        if (crawled.has(url) && retry === 0) continue;
 
         const label = url.replace(BASE_URL, '') || '/';
-        setStatus(`🕷 [${crawled.size}] Crawling ${label}...`, 'working');
+        const progress = Math.round((crawled.size / (crawled.size + queue.length + 1)) * 100);
 
-        await navigateTo(url);
-        await waitForSettle();
-        await autoScrollPage();
+        // #9: Progress & ETA
+        const eta = calculateETA(crawled.size, crawled.size + queue.length + 1);
+        progressBar.style.width = `${progress}%`;
+        setStatus(`🕷 [${crawled.size + 1}/${crawled.size + queue.length + 1}] ${progress}% - ETA: ${eta} - ${label}`, 'working');
 
-        const state = await capturePageState();
-        if (state) {
+        const pageStart = Date.now();
+        try {
+            await navigateTo(url);
+            await waitForSettle();
+            await autoScrollPage();
+
+            const state = await capturePageState();
+            if (!state || !state.html) throw new Error('Capture failed');
+
             captured.pages[url] = state;
+            crawled.add(url);
             counts.pages = Object.keys(captured.pages).length;
             addPageRow(state);
             updateStatsUI();
@@ -328,9 +350,22 @@ async function autoCrawl() {
                     const clean = normaliseUrl(link);
                     if (clean && !known.has(clean)) {
                         known.add(clean);
-                        queue.push({ url: clean, depth: depth + 1 });
+                        queue.push({ url: clean, depth: depth + 1, retry: 0 });
                     }
                 }
+            }
+            crawlStats.times.push(Date.now() - pageStart);
+        } catch (e) {
+            console.error(`[Cloner] Failed page ${url}:`, e);
+            if (retry < 3) {
+                console.warn(`[Cloner] Retrying ${url} (${retry + 1}/3)`);
+                queue.push({ url, depth, retry: retry + 1 });
+                setStatus(`🔄 Retrying [${retry + 1}/3] ${label}...`, 'working');
+                await sleep(2000);
+            } else {
+                crawled.add(url); // Mark as attempted
+                setStatus(`❌ Failed ${label} after 3 retries`, 'error');
+                await sleep(1000);
             }
         }
         await sleep(CRAWL_DELAY);
@@ -340,11 +375,20 @@ async function autoCrawl() {
     btnCrawl.disabled = false;
     btnCancel.disabled = true;
     btnDl.disabled = Object.keys(captured.pages).length === 0;
+    progressContainer.style.display = 'none';
 
-    // #15 Desktop notification
     chrome.runtime.sendMessage({ type: 'NOTIFY', title: 'Crawl Complete', message: `Captured ${crawled.size} pages.` });
-
     setStatus(cancelRequested ? `⏹ Cancelled - ${crawled.size} pages.` : `✅ Done - ${crawled.size} pages.`, cancelRequested ? 'working' : 'done');
+}
+
+function calculateETA(done, total) {
+    if (done === 0 || crawlStats.times.length === 0) return 'estimating...';
+    const avg = crawlStats.times.reduce((a, b) => a + b, 0) / crawlStats.times.length;
+    const remaining = total - done;
+    const ms = remaining * (avg + CRAWL_DELAY);
+    const mins = Math.floor(ms / 60000);
+    const secs = Math.floor((ms % 60000) / 1000);
+    return `${mins}m ${secs}s`;
 }
 
 // ─── Page Capture Logic ───────────────────────────────────────────────────────
@@ -381,6 +425,47 @@ function shouldSkipAsset(url) {
     return /\.(pdf|zip|exe|dmg|mp4|mp3)(\?|$)/i.test(url) ||
         url.includes('google-analytics') ||
         url.includes('tel:') || url.includes('mailto:');
+}
+
+// ─── #17: SSE Interception Logic ──────────────────────────────────────────────
+async function injectSSEInterceptor() {
+    // We inject a script that wraps EventSource to capture messages
+    const script = `
+        (function() {
+            if (window._sse_interceptor_active) return;
+            window._sse_interceptor_active = true;
+            const RealEventSource = window.EventSource;
+            window.EventSource = function(url, options) {
+                const es = new RealEventSource(url, options);
+                console.log('[Cloner] Intercepted SSE:', url);
+                es.addEventListener('message', (e) => {
+                    const msg = {
+                        url: url,
+                        data: e.data,
+                        type: e.type,
+                        timestamp: Date.now()
+                    };
+                    // Store locally in the page, we'll poll it
+                    window._captured_sse = window._captured_sse || [];
+                    window._captured_sse.push(msg);
+                });
+                return es;
+            };
+        })();
+    `;
+    chrome.devtools.inspectedWindow.eval(script);
+
+    // Set up polling in the extension panel
+    const poll = async () => {
+        if (!isCrawling) return;
+        chrome.devtools.inspectedWindow.eval('window._captured_sse; window._captured_sse = [];', (result) => {
+            if (result && Array.isArray(result) && result.length > 0) {
+                captured.sse.push(...result);
+            }
+            setTimeout(poll, 2000);
+        });
+    };
+    poll();
 }
 
 // ─── Styles & Save (#1, #16) ──────────────────────────────────────────────────
@@ -430,6 +515,11 @@ async function downloadZip() {
         const options = r.encoding === 'base64' ? { base64: true } : {};
         zip.file(assetMap[r.url], r.content, options);
     });
+
+    // Write SSE log
+    if (captured.sse.length > 0) {
+        zip.file('network/sse-messages.json', JSON.stringify(captured.sse, null, 2));
+    }
 
     // Final meta
     zip.file('__manifest.json', JSON.stringify({
