@@ -10,6 +10,7 @@
   "permissions": [
     "downloads",
     "cookies",
+    "notifications",
     "storage",
     "tabs"
   ],

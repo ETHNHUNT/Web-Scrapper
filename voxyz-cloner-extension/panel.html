@@ -33,13 +33,16 @@
         }
 
         .btn {
-            padding: 5px 14px;
+            padding: 5px 12px;
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
-            transition: opacity 0.15s;
+            transition: opacity 0.15s, background 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
 
         .btn:disabled {
@@ -83,17 +86,74 @@
             background: #4a4a4a;
         }
 
-        .toolbar-hint {
-            color: #666;
+        .toolbar-separator {
+            width: 1px;
+            height: 20px;
+            background: #3e3e42;
+            margin: 0 4px;
+        }
+
+        .toolbar-select {
+            background: #3c3c3c;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 3px;
+            padding: 2px 4px;
             font-size: 11px;
-            margin-left: 6px;
+            outline: none;
+        }
+
+        .toolbar-label {
+            font-size: 11px;
+            color: #888;
+        }
+
+        .filter-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: #aaa;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .filter-toggle input {
+            cursor: pointer;
+        }
+
+        /* ── Tabs ──────────────────────────────────── */
+        .tabs {
+            display: flex;
+            background: #252526;
+            border-bottom: 1px solid #3e3e42;
+            flex-shrink: 0;
+        }
+
+        .tab {
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 600;
+            color: #969696;
+            border-bottom: 2px solid transparent;
+        }
+
+        .tab:hover {
+            color: #fff;
+        }
+
+        .tab.active {
+            color: #fff;
+            background: #1e1e1e;
+            border-bottom-color: #007acc;
         }
 
         /* ── Stats bar ─────────────────────────────── */
         .stats-bar {
             display: flex;
-            gap: 18px;
-            padding: 5px 12px;
+            gap: 14px;
+            padding: 6px 12px;
             background: #1e1e1e;
             border-bottom: 1px solid #2d2d2d;
             flex-wrap: wrap;
@@ -104,7 +164,7 @@
             display: flex;
             align-items: center;
             gap: 4px;
-            font-size: 11px;
+            font-size: 10px;
         }
 
         .stat .lbl {
@@ -115,37 +175,52 @@
             color: #4fc3f7;
             font-weight: 700;
             font-variant-numeric: tabular-nums;
-            min-width: 22px;
         }
 
-        /* ── Request feed ──────────────────────────── */
-        .feed {
+        /* ── Content Panes ─────────────────────────── */
+        .pane {
+            flex: 1;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .pane.active {
+            display: flex;
+        }
+
+        .feed,
+        .page-list {
             flex: 1;
             overflow-y: auto;
-            font-family: 'Consolas', monospace;
+            font-family: 'Consolas', 'Courier New', monospace;
         }
 
-        .feed-row {
+        /* ── Feed Rows ─────────────────────────────── */
+        .feed-row,
+        .page-row {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 3px 12px;
+            padding: 4px 12px;
             border-bottom: 1px solid #252525;
             font-size: 11px;
         }
 
-        .feed-row:hover {
+        .feed-row:hover,
+        .page-row:hover {
             background: #2a2d2e;
         }
 
         .badge {
-            min-width: 46px;
-            padding: 1px 5px;
+            min-width: 42px;
+            padding: 1px 4px;
             border-radius: 3px;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 700;
             text-align: center;
             flex-shrink: 0;
+            text-transform: uppercase;
         }
 
         .b-html {
@@ -184,7 +259,7 @@
         }
 
         .st {
-            min-width: 32px;
+            min-width: 28px;
             font-weight: 700;
             flex-shrink: 0;
         }
@@ -201,7 +276,8 @@
             color: #ffb74d;
         }
 
-        .req-url {
+        .req-url,
+        .page-url {
             flex: 1;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -209,8 +285,9 @@
             color: #c5c5c5;
         }
 
-        .req-size {
-            min-width: 60px;
+        .req-size,
+        .page-assets {
+            min-width: 50px;
             text-align: right;
             color: #666;
             flex-shrink: 0;
@@ -226,6 +303,8 @@
             overflow: hidden;
             text-overflow: ellipsis;
             flex-shrink: 0;
+            display: flex;
+            justify-content: space-between;
         }
 
         .statusbar.done {
@@ -239,6 +318,11 @@
         .statusbar.working {
             background: #7a5d00;
         }
+
+        .zip-est {
+            font-weight: 600;
+            opacity: 0.9;
+        }
     </style>
 </head>
 
@@ -247,9 +331,30 @@
     <div class="toolbar">
         <button class="btn btn-green" id="btn-start">▶ Start</button>
         <button class="btn btn-red" id="btn-stop" disabled>⏹ Stop</button>
+        <div class="toolbar-separator"></div>
+        <button class="btn btn-blue" id="btn-crawl" disabled>🕷 Auto-Crawl</button>
+        <button class="btn btn-red" id="btn-cancel" disabled>🛑 Cancel</button>
+        <div class="toolbar-separator"></div>
+        <span class="toolbar-label">Depth:</span>
+        <select id="sel-depth" class="toolbar-select">
+            <option value="0">Current only</option>
+            <option value="1">Direct links (1)</option>
+            <option value="2">Level 2</option>
+            <option value="99" selected>Full Site (∞)</option>
+        </select>
+        <div class="toolbar-separator"></div>
+        <label class="filter-toggle">
+            <input type="checkbox" id="chk-filter" checked>
+            <span>voxyz.space only</span>
+        </label>
+        <div class="toolbar-separator"></div>
         <button class="btn btn-blue" id="btn-dl" disabled>⬇ Download All</button>
-        <button class="btn btn-gray" id="btn-clear">✕ Clear</button>
-        <span class="toolbar-hint">Open DevTools → reload voxyz.space → browse → Download All</span>
+        <button class="btn btn-gray" id="btn-clear">✕ Clear All</button>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" data-pane="pane-requests">Requests</div>
+        <div class="tab" data-pane="pane-pages">Crawled Pages (<span id="c-pages">0</span>)</div>
     </div>
 
     <div class="stats-bar">
@@ -257,16 +362,22 @@
         <div class="stat"><span class="lbl">HTML</span> <span class="val" id="c-html">0</span></div>
         <div class="stat"><span class="lbl">CSS</span> <span class="val" id="c-css">0</span></div>
         <div class="stat"><span class="lbl">JS</span> <span class="val" id="c-js">0</span></div>
-        <div class="stat"><span class="lbl">JSON/API</span><span class="val" id="c-json">0</span></div>
-        <div class="stat"><span class="lbl">Images</span> <span class="val" id="c-img">0</span></div>
+        <div class="stat"><span class="lbl">JSON</span> <span class="val" id="c-json">0</span></div>
+        <div class="stat"><span class="lbl">IMG</span> <span class="val" id="c-img">0</span></div>
         <div class="stat"><span class="lbl">Fonts</span> <span class="val" id="c-font">0</span></div>
-        <div class="stat"><span class="lbl">Other</span> <span class="val" id="c-other">0</span></div>
     </div>
 
-    <div class="feed" id="feed"></div>
+    <div id="pane-requests" class="pane active">
+        <div class="feed" id="feed"></div>
+    </div>
+
+    <div id="pane-pages" class="pane">
+        <div class="page-list" id="page-list"></div>
+    </div>
 
     <div class="statusbar" id="statusbar">
-        Ready — press Start, then reload the page in the same tab
+        <span id="status-text">Ready — press Start + reload page</span>
+        <span id="zip-est" class="zip-est">Est: 0 MB</span>
     </div>
 
     <script src="panel.js"></script>
