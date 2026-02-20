@@ -12,6 +12,7 @@
     "cookies",
     "notifications",
     "storage",
+    "unlimitedStorage",
     "tabs",
     "scripting"
   ],

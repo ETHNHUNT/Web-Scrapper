@@ -150,8 +150,14 @@ function updateZipEstimator() {
 }
 
 // ─── Persistence (#6) ─────────────────────────────────────────────────────────
+function isContextValid() {
+    return typeof chrome !== 'undefined' && chrome.runtime && !!chrome.runtime.id;
+}
+
 async function saveToStorage() {
+    if (!isContextValid()) return;
     if (Date.now() - lastSaveTime < 5000) return; // limit frequency
+
     const data = {
         requests: captured.requests,
         requestUrls: Array.from(captured.requestUrls),
@@ -164,27 +170,38 @@ async function saveToStorage() {
         await chrome.storage.local.set({ 'voxyz_cloner_state': data });
         lastSaveTime = Date.now();
     } catch (e) {
-        console.warn('[Cloner] Storage quota might be hit', e);
+        if (e.message.includes('context invalidated')) {
+            console.warn('[Cloner] Extension context invalidated - stopping auto-save');
+        } else {
+            console.error('[Cloner] Storage error:', e);
+        }
     }
 }
 
 async function loadFromStorage() {
-    const res = await chrome.storage.local.get('voxyz_cloner_state');
-    if (res.voxyz_cloner_state) {
-        const data = res.voxyz_cloner_state;
-        captured.requests = data.requests || [];
-        captured.requestUrls = new Set(data.requestUrls || []);
-        captured.pages = data.pages || {};
-        Object.assign(counts, data.counts || {});
+    if (!isContextValid()) return;
+    try {
+        const res = await chrome.storage.local.get('voxyz_cloner_state');
+        if (res.voxyz_cloner_state) {
+            const data = res.voxyz_cloner_state;
+            captured.requests = data.requests || [];
+            captured.requestUrls = new Set(data.requestUrls || []);
+            captured.pages = data.pages || {};
+            Object.assign(counts, data.counts || {});
 
-        // Rebuild UI
-        feed.innerHTML = '';
-        captured.requests.slice(-100).forEach(addFeedRow);
-        pageList.innerHTML = '';
-        Object.values(captured.pages).forEach(addPageRow);
-        updateStatsUI();
-        if (captured.requests.length > 0) btnDl.disabled = false;
-        setStatus(`Loaded session: ${captured.requests.length} assets, ${Object.keys(captured.pages).length} pages`);
+            // Rebuild UI
+            feed.innerHTML = '';
+            captured.requests.slice(-100).forEach(addFeedRow);
+            pageList.innerHTML = '';
+            Object.values(captured.pages).forEach(addPageRow);
+            updateStatsUI();
+            if (captured.requests.length > 0) btnDl.disabled = false;
+            setStatus(`Loaded session: ${captured.requests.length} assets, ${Object.keys(captured.pages).length} pages`);
+        }
+    } catch (e) {
+        if (!e.message.includes('context invalidated')) {
+            console.error('[Cloner] Failed to load session:', e);
+        }
     }
 }
 
