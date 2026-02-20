@@ -39,6 +39,7 @@ const btnDl = document.getElementById('btn-dl');
 const btnClear = document.getElementById('btn-clear');
 
 const chkFilter = document.getElementById('chk-filter');
+const chkStealth = document.getElementById('chk-stealth');
 const selDepth = document.getElementById('sel-depth');
 
 const counterEls = {
@@ -243,29 +244,69 @@ btnCancel.addEventListener('click', () => {
 });
 btnDl.addEventListener('click', downloadZip);
 
-// ─── Auto-scroll (#3, #11) ────────────────────────────────────────────────────
+// ─── Stealth Scripts (#21) ───────────────────────────────────────────────────
+function injectStealthScripts() {
+    const script = `
+        (function() {
+            if (window._stealth_active) return;
+            window._stealth_active = true;
+            
+            // Mouse Jitter
+            document.addEventListener('mousemove', (e) => {}, {passive: true});
+            setInterval(() => {
+                const x = Math.random() * window.innerWidth;
+                const y = Math.random() * window.innerHeight;
+                const event = new MouseEvent('mousemove', {
+                    view: window,
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: x,
+                    clientY: y
+                });
+                document.dispatchEvent(event);
+            }, 3000 + Math.random() * 5000);
+
+            console.log('[Cloner] Stealth scripts active');
+        })();
+    `;
+    chrome.devtools.inspectedWindow.eval(script);
+}
+
+// ─── Auto-scroll (#3, #11, #20) ───────────────────────────────────────────────
 function autoScrollPage() {
+    const isStealth = chkStealth.checked;
     return new Promise(resolve => {
         chrome.devtools.inspectedWindow.eval('document.documentElement.scrollHeight', (totalHeight) => {
             if (!totalHeight || totalHeight < 400) { resolve(); return; }
-            const stepPx = 800;
+            const stepPx = isStealth ? 600 : 800;
             const stepCount = Math.ceil(totalHeight / stepPx);
+
             const script = `
                 (function() {
                     let i = 0;
+                    const isStealth = \${isStealth};
                     const tick = () => {
-                        window.scrollTo(0, i * ${stepPx});
+                        let currentStep = i * \${stepPx};
+                        if (isStealth) {
+                            currentStep += (Math.random() - 0.5) * 200; // Jitter step
+                        }
+                        window.scrollTo(0, currentStep);
                         i++;
-                        if (i <= ${stepCount}) setTimeout(tick, 250);
-                        else {
+                        
+                        if (i <= \${stepCount}) {
+                            let wait = isStealth ? (200 + Math.random() * 300) : 250;
+                            if (isStealth && Math.random() > 0.9) wait += 1500; // Occasional "reading" pause
+                            setTimeout(tick, wait);
+                        } else {
                             window.scrollTo(0, 0);
-                            setTimeout(() => {}, 500); // settle
+                            setTimeout(() => {}, 500); 
                         }
                     };
                     tick();
                 })()
             `;
-            chrome.devtools.inspectedWindow.eval(script, () => setTimeout(resolve, stepCount * 250 + 1000));
+            const timeout = isStealth ? (stepCount * 500 + 3000) : (stepCount * 250 + 1000);
+            chrome.devtools.inspectedWindow.eval(script, () => setTimeout(resolve, timeout));
         });
     });
 }
@@ -315,6 +356,7 @@ async function autoCrawl() {
 
     // #17: Start SSE Interception
     injectSSEInterceptor();
+    if (chkStealth.checked) injectStealthScripts();
 
     while (queue.length > 0) {
         if (cancelRequested) break;
@@ -368,7 +410,14 @@ async function autoCrawl() {
                 await sleep(1000);
             }
         }
-        await sleep(CRAWL_DELAY);
+
+        // #19: Randomized Delay (Jitter)
+        let delay = CRAWL_DELAY;
+        if (chkStealth.checked) {
+            delay = CRAWL_DELAY * (0.8 + Math.random() * 0.7); // 80% to 150%
+            if (Math.random() > 0.8) delay += 2000; // Occasional long pause
+        }
+        await sleep(delay);
     }
 
     isCrawling = false;
