@@ -284,16 +284,16 @@ function autoScrollPage() {
             const script = `
                 (function() {
                     let i = 0;
-                    const isStealth = \${isStealth};
+                    const isStealth = ${isStealth};
                     const tick = () => {
-                        let currentStep = i * \${stepPx};
+                        let currentStep = i * ${stepPx};
                         if (isStealth) {
                             currentStep += (Math.random() - 0.5) * 200; // Jitter step
                         }
                         window.scrollTo(0, currentStep);
                         i++;
                         
-                        if (i <= \${stepCount}) {
+                        if (i <= ${stepCount}) {
                             let wait = isStealth ? (200 + Math.random() * 300) : 250;
                             if (isStealth && Math.random() > 0.9) wait += 1500; // Occasional "reading" pause
                             setTimeout(tick, wait);
