@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "VoxYZ Site Cloner",
+  "version": "2.1.0",
+  "description": "Captures all network requests, DOM, assets & storage from VoxYZ for cloning",
+  "devtools_page": "devtools.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "downloads",
+    "cookies",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}

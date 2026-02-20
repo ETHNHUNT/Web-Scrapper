@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            font-size: 13px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* ── Toolbar ───────────────────────────────── */
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: #252526;
+            border-bottom: 1px solid #3e3e42;
+            flex-shrink: 0;
+        }
+
+        .btn {
+            padding: 5px 14px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: opacity 0.15s;
+        }
+
+        .btn:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+
+        .btn-green {
+            background: #4caf50;
+            color: #fff;
+        }
+
+        .btn-green:hover:not(:disabled) {
+            background: #43a047;
+        }
+
+        .btn-red {
+            background: #f44336;
+            color: #fff;
+        }
+
+        .btn-red:hover:not(:disabled) {
+            background: #e53935;
+        }
+
+        .btn-blue {
+            background: #2196f3;
+            color: #fff;
+        }
+
+        .btn-blue:hover:not(:disabled) {
+            background: #1e88e5;
+        }
+
+        .btn-gray {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .btn-gray:hover:not(:disabled) {
+            background: #4a4a4a;
+        }
+
+        .toolbar-hint {
+            color: #666;
+            font-size: 11px;
+            margin-left: 6px;
+        }
+
+        /* ── Stats bar ─────────────────────────────── */
+        .stats-bar {
+            display: flex;
+            gap: 18px;
+            padding: 5px 12px;
+            background: #1e1e1e;
+            border-bottom: 1px solid #2d2d2d;
+            flex-wrap: wrap;
+            flex-shrink: 0;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+        }
+
+        .stat .lbl {
+            color: #666;
+        }
+
+        .stat .val {
+            color: #4fc3f7;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            min-width: 22px;
+        }
+
+        /* ── Request feed ──────────────────────────── */
+        .feed {
+            flex: 1;
+            overflow-y: auto;
+            font-family: 'Consolas', monospace;
+        }
+
+        .feed-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 3px 12px;
+            border-bottom: 1px solid #252525;
+            font-size: 11px;
+        }
+
+        .feed-row:hover {
+            background: #2a2d2e;
+        }
+
+        .badge {
+            min-width: 46px;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 700;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .b-html {
+            background: #1a3a5c;
+            color: #4fc3f7;
+        }
+
+        .b-css {
+            background: #1a3a22;
+            color: #81c784;
+        }
+
+        .b-js {
+            background: #3a3a18;
+            color: #fff176;
+        }
+
+        .b-json {
+            background: #3a1a1a;
+            color: #ef9a9a;
+        }
+
+        .b-img {
+            background: #2a1a3a;
+            color: #ce93d8;
+        }
+
+        .b-font {
+            background: #1a2a3a;
+            color: #80deea;
+        }
+
+        .b-other {
+            background: #2a2a2a;
+            color: #888;
+        }
+
+        .st {
+            min-width: 32px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .st-ok {
+            color: #81c784;
+        }
+
+        .st-err {
+            color: #ef9a9a;
+        }
+
+        .st-redir {
+            color: #ffb74d;
+        }
+
+        .req-url {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #c5c5c5;
+        }
+
+        .req-size {
+            min-width: 60px;
+            text-align: right;
+            color: #666;
+            flex-shrink: 0;
+        }
+
+        /* ── Status bar ────────────────────────────── */
+        .statusbar {
+            padding: 5px 12px;
+            background: #007acc;
+            color: #fff;
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex-shrink: 0;
+        }
+
+        .statusbar.done {
+            background: #2d7a2d;
+        }
+
+        .statusbar.error {
+            background: #8b1a1a;
+        }
+
+        .statusbar.working {
+            background: #7a5d00;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="toolbar">
+        <button class="btn btn-green" id="btn-start">▶ Start</button>
+        <button class="btn btn-red" id="btn-stop" disabled>⏹ Stop</button>
+        <button class="btn btn-blue" id="btn-dl" disabled>⬇ Download All</button>
+        <button class="btn btn-gray" id="btn-clear">✕ Clear</button>
+        <span class="toolbar-hint">Open DevTools → reload voxyz.space → browse → Download All</span>
+    </div>
+
+    <div class="stats-bar">
+        <div class="stat"><span class="lbl">Total</span> <span class="val" id="c-total">0</span></div>
+        <div class="stat"><span class="lbl">HTML</span> <span class="val" id="c-html">0</span></div>
+        <div class="stat"><span class="lbl">CSS</span> <span class="val" id="c-css">0</span></div>
+        <div class="stat"><span class="lbl">JS</span> <span class="val" id="c-js">0</span></div>
+        <div class="stat"><span class="lbl">JSON/API</span><span class="val" id="c-json">0</span></div>
+        <div class="stat"><span class="lbl">Images</span> <span class="val" id="c-img">0</span></div>
+        <div class="stat"><span class="lbl">Fonts</span> <span class="val" id="c-font">0</span></div>
+        <div class="stat"><span class="lbl">Other</span> <span class="val" id="c-other">0</span></div>
+    </div>
+
+    <div class="feed" id="feed"></div>
+
+    <div class="statusbar" id="statusbar">
+        Ready — press Start, then reload the page in the same tab
+    </div>
+
+    <script src="panel.js"></script>
+</body>
+
+</html>
