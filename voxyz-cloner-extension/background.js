@@ -1,5 +1,11 @@
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
+    // Keep-alive ping from panel — prevents MV3 service worker from sleeping during long crawls
+    if (msg.type === 'PING') {
+        sendResponse({ ok: true });
+        return false; // sync response, no need to keep channel open
+    }
+
     // Fetch all cookies for a URL
     if (msg.type === 'GET_COOKIES') {
         chrome.cookies.getAll({ url: msg.url }, cookies => sendResponse({ cookies }));

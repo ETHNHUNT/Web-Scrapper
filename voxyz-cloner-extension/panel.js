@@ -57,13 +57,72 @@ const counts = { total: 0, html: 0, css: 0, js: 0, json: 0, img: 0, font: 0, oth
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const tryParseJSON = str => { try { return JSON.parse(str); } catch { return null; } };
 
+/**
+ * Safely send a message to the background service worker.
+ * Chrome MV3 service workers can be suspended after ~30s idle.
+ * We detect this, wait briefly to let Chrome revive the worker, then retry.
+ */
+async function safeMessage(msg, retries = 2) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        if (!isContextValid()) throw new Error('Extension context invalidated.');
+        try {
+            return await new Promise((resolve, reject) => {
+                try {
+                    chrome.runtime.sendMessage(msg, response => {
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                        } else {
+                            resolve(response);
+                        }
+                    });
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        } catch (e) {
+            const msg_str = e.message || '';
+            // Unrecoverable — context is gone entirely
+            if (msg_str.includes('context invalidated') || msg_str.includes('Extension context')) {
+                throw e; // bubble up immediately, no retry
+            }
+            // Could be a sleeping worker — wait and retry
+            if (attempt < retries) {
+                console.warn(`[Cloner] sendMessage failed (attempt ${attempt + 1}), retrying in 1s...`, e.message);
+                await sleep(1000);
+            } else {
+                throw e;
+            }
+        }
+    }
+}
+
+// Keep-alive: ping background every 20s so the MV3 service worker never sleeps during a crawl
+let _keepAliveTimer = null;
+function startKeepAlive() {
+    if (_keepAliveTimer) return;
+    _keepAliveTimer = setInterval(() => {
+        if (!isContextValid()) { stopKeepAlive(); return; }
+        try {
+            chrome.runtime.sendMessage({ type: 'PING' }, () => void chrome.runtime.lastError);
+        } catch (_) { stopKeepAlive(); }
+    }, 20000);
+    console.log('[Cloner] Keep-alive started');
+}
+function stopKeepAlive() {
+    if (_keepAliveTimer) { clearInterval(_keepAliveTimer); _keepAliveTimer = null; }
+    console.log('[Cloner] Keep-alive stopped');
+}
+
 async function fetchCookies(url) {
-    return new Promise(resolve => {
-        chrome.runtime.sendMessage({ type: 'GET_COOKIES', url }, response => {
-            if (response && response.cookies) resolve(response.cookies);
-            else resolve([]);
-        });
-    });
+    try {
+        const response = await safeMessage({ type: 'GET_COOKIES', url });
+        return (response && response.cookies) ? response.cookies : [];
+    } catch (e) {
+        if (!(e.message || '').includes('context invalidated')) {
+            console.warn('[Cloner] fetchCookies failed:', e.message);
+        }
+        return [];
+    }
 }
 
 function classify(mime = '', url = '') {
@@ -440,11 +499,15 @@ async function autoCrawl() {
     injectSSEInterceptor();
     if (chkStealth.checked) injectStealthScripts();
 
+    // Keep background service worker alive for the duration of the crawl
+    startKeepAlive();
+
     const maxWorkers = 3;
     let activeWorkers = 0;
+    let contextLost = false; // Set true if extension context dies; stops all workers
 
     const worker = async () => {
-        while (queue.length > 0 && !cancelRequested) {
+        while (queue.length > 0 && !cancelRequested && !contextLost) {
             const task = queue.shift();
             if (crawled.has(task.url) && task.retry === 0) continue;
 
@@ -455,9 +518,7 @@ async function autoCrawl() {
             try {
                 setStatus(`🚀 Concurrent [${crawled.size + 1}/${crawled.size + queue.length + activeWorkers}] - ${label}`, 'working');
 
-                const response = await new Promise(resolve => {
-                    chrome.runtime.sendMessage({ type: 'CRAWL_PAGE', url: task.url }, resolve);
-                });
+                const response = await safeMessage({ type: 'CRAWL_PAGE', url: task.url });
 
                 if (response && response.status === 'ok') {
                     const state = response.data;
@@ -465,7 +526,7 @@ async function autoCrawl() {
                     captured.storage[task.url] = state.storage;
 
                     const cookies = await fetchCookies(task.url);
-                    if (cookies) {
+                    if (cookies && cookies.length > 0) {
                         const existingNames = new Set(captured.cookies.map(c => c.name));
                         cookies.forEach(c => { if (!existingNames.has(c.name)) captured.cookies.push(c); });
                     }
@@ -488,11 +549,22 @@ async function autoCrawl() {
                     throw new Error(response?.message || 'Worker failure');
                 }
             } catch (e) {
-                console.error(`[Cloner] worker failed for ${task.url}:`, e);
-                if (task.retry < 2) queue.push({ ...task, retry: task.retry + 1 });
+                const errMsg = e.message || '';
+                // If the extension context itself died, stop all workers immediately
+                if (errMsg.includes('context invalidated') || errMsg.includes('Extension context')) {
+                    contextLost = true;
+                    setStatus('⚠️ Extension reloaded — please re-open DevTools panel', 'err');
+                    console.error('[Cloner] Extension context lost — aborting crawl.', e);
+                } else {
+                    console.error(`[Cloner] worker failed for ${task.url}:`, e);
+                    // Only retry non-fatal errors, max 2 times
+                    if (task.retry < 2) queue.push({ ...task, retry: task.retry + 1 });
+                }
             } finally {
                 activeWorkers--;
             }
+
+            if (contextLost) break;
 
             // Randomized jitter between tasks
             await sleep(chkStealth.checked ? 500 + Math.random() * 1000 : 200);
@@ -507,14 +579,19 @@ async function autoCrawl() {
     const workers = Array(maxWorkers).fill(null).map(() => worker());
     await Promise.all(workers);
 
+    stopKeepAlive();
     isCrawling = false;
     btnCrawl.disabled = false;
     btnCancel.disabled = true;
     btnDl.disabled = Object.keys(captured.pages).length === 0;
     progressContainer.style.display = 'none';
 
-    chrome.runtime.sendMessage({ type: 'NOTIFY', title: 'Crawl Complete', message: `Captured ${crawled.size} pages.` });
-    setStatus(cancelRequested ? `⏹ Cancelled - ${crawled.size} pages.` : `✅ Done - ${crawled.size} pages.`, cancelRequested ? 'working' : 'done');
+    if (!contextLost) {
+        try {
+            await safeMessage({ type: 'NOTIFY', title: 'Crawl Complete', message: `Captured ${crawled.size} pages.` });
+        } catch (_) { /* background may be gone after a very long crawl — that's fine */ }
+        setStatus(cancelRequested ? `⏹ Cancelled - ${crawled.size} pages.` : `✅ Done - ${crawled.size} pages.`, cancelRequested ? 'working' : 'done');
+    }
 }
 
 function calculateETA(done, total) {
@@ -650,17 +727,20 @@ async function injectSSEInterceptor() {
             };
         })();
     `;
-    chrome.devtools.inspectedWindow.eval(script);
+    if (isContextValid()) chrome.devtools.inspectedWindow.eval(script);
 
-    // Set up polling in the extension panel
+    // Set up polling in the extension panel — guard against context invalidation
     const poll = async () => {
-        if (!isCrawling) return;
-        chrome.devtools.inspectedWindow.eval('window._captured_sse; window._captured_sse = [];', (result) => {
-            if (result && Array.isArray(result) && result.length > 0) {
-                captured.sse.push(...result);
-            }
-            setTimeout(poll, 2000);
-        });
+        if (!isCrawling || !isContextValid()) return;
+        try {
+            chrome.devtools.inspectedWindow.eval('window._captured_sse; window._captured_sse = [];', (result) => {
+                if (chrome.runtime.lastError) return; // context gone
+                if (result && Array.isArray(result) && result.length > 0) {
+                    captured.sse.push(...result);
+                }
+                setTimeout(poll, 2000);
+            });
+        } catch (_) { /* context gone */ }
     };
     poll();
 }
